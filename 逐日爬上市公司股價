@@ -1,0 +1,94 @@
+from bs4 import BeautifulSoup
+from fake_useragent import UserAgent
+from threading import Thread
+from multiprocessing import Queue
+from datetime import datetime
+import requests, time, random
+import pandas as pd
+import numpy as np
+
+def sorting(temp, n):   #整理爬蟲資料
+    x = temp.find_all("td")
+    data = pd.DataFrame()                       
+    for t in range(0, len(x)):              
+        if t // n == 0:
+            pass
+        else:
+            data.loc[t // n, t % n] = x[t].text
+    data = data.reset_index(drop = True)
+    return data
+
+def transform_date(date):   #民國轉西元
+    y, m, d = date.split('/')
+    temp = str(int(y)+1911) + '-' + m  + '-' + d
+    oneDay_datetime = datetime.strptime(temp,"%Y-%m-%d")
+    return oneDay_datetime
+
+def transform_data(temp, calendar):
+    open = temp[3].str.replace(',','').str.replace('--','nan').astype('float')       
+    high = temp[4].str.replace(',','').str.replace('--','nan').astype('float')
+    low = temp[5].str.replace(',','').str.replace('--','nan').astype('float')       
+    close = temp[6].str.replace(',','').str.replace('--','nan').astype('float')
+    volume = ((temp[1].str.replace(',','').str.replace('--','nan').astype('float')/1000)).apply(np.floor)
+    raw_data = pd.concat([calendar, open, high, low, close, volume], axis = 1)  
+    raw_data.columns=['年月日', '開盤價(元)', '最高價(元)', '最低價(元)', '收盤價(元)', '成交量(千股)']
+    return raw_data
+
+headers = {'user-agent': UserAgent().random }
+data = {}
+
+class CrawInfo(Thread): #重寫構造函數
+    def __init__(self, url_queue):
+        Thread.__init__(self)
+        self.url_queue = url_queue
+        
+    def run(self):
+        while self.url_queue.empty() == False:
+            url = self.url_queue.get()
+            respone = requests.get(url, headers = headers)
+            soup = BeautifulSoup(respone.text, "html.parser")
+            data[url[85:]] = sorting(soup, 9)
+            print(url[85:])
+            delay_choices = [7, 11, 13]
+            delay = random.choice(delay_choices)
+            time.sleep(delay)
+
+全部 = pd.read_excel('C:/Users/User/Desktop/quantitative/data/現有上市公司.xlsx')
+
+if __name__ == '__main__':
+    url_queue = Queue()
+    base_url = 'https://www.twse.com.tw/exchangeReport/STOCK_DAY?response=html&date=20210802&stockNo={}'
+    for i in list(全部[0]):
+        new_url = base_url.format(i)
+        url_queue.put(new_url)
+    for t in range(3):
+        Crawl = CrawInfo(url_queue)
+        Crawl.start()
+    
+    for stock in list(全部[0]):
+        raw_data = pd.read_excel('C:/Users/User/Desktop/quantitative/stocks/' + str(stock) + '.xlsx')
+        
+        temp = data[str(stock)]
+        temp = temp.sort_index(axis=1)
+        
+        if len(temp) == 0:
+            print('無資料:%s' %(stock))
+            raw_data.to_excel('C:/Users/User/Desktop/quantitative/stocks1/' + str(stock) + '.xlsx', index = False)
+            continue
+        
+        calendar = pd.DataFrame()
+        
+        times = temp[0]
+        
+        for i in range(0, len(times)):
+            change = transform_date(times[i])
+            calendar = calendar.append([change], ignore_index = True)
+            
+        if calendar[0].iloc[-1] != datetime.now().date():
+            print('最後資料非今日:%s' %(stock))
+        
+        x = transform_data(temp, calendar)
+        raw_data1 = pd.concat([raw_data, x], ignore_index = True)
+        raw_data1.to_excel('C:/Users/User/Desktop/quantitative/stocks1/' + str(stock) + '.xlsx', index = False)
+        
+
