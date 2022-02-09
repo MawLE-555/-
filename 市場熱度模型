@@ -1,0 +1,110 @@
+import pymysql
+import pandas as pd
+from sqlalchemy import create_engine
+import numpy as np
+
+def score(close, ma5, ma10, ma20, ma60):
+    score = 0
+    if close > ma5:
+        score = score + 1
+    if close > ma10:
+        score = score + 1
+    if close > ma20:
+        score = score + 1
+    if ma5 > ma10 > ma20 > ma60:
+        score = score + 1
+    if ma60 > ma5 and ma60 > ma10 and ma60 > ma20:
+        score = score * 0.5
+    return score/4
+
+def input(industry, volumes, price):
+    x = sheet[str(industry)].iloc[-1,1:]
+    y = x[x >= 0.5].index
+    z = list(y[0:-2])
+    for i in list(y[0:-2]):
+        if data[i].volume.iloc[-1] < volumes or data[i].close.iloc[-1] > price:
+            z.remove(i)
+    print(z)
+
+# 資料庫參數設定
+db = {"host": "localhost",
+    "user": "root",
+    "passwd": "strigo80010",
+    "database":"data"
+    }
+
+connection = pymysql.connect(**db)
+
+cursor = connection.cursor()
+
+#cursor.execute('show databases')
+#for i in cursor:
+    #print(i)
+
+database_connection = create_engine('mysql+mysqlconnector://{0}:{1}@{2}/{3}'.
+                                               format(db['user'], db['passwd'], 
+                                                      db['host'], db['database']))
+
+
+行業 = pd.read_excel('C:/Users/User/Desktop/quantitative/data/行業.xlsx')
+
+data = {}
+sheet = {}
+final = pd.DataFrame(columns = ['date'])
+
+for industry in 行業['行業']:
+    print(industry)
+    
+    產業 = pd.read_excel('C:/Users/User/Desktop/quantitative/data/全部/'+ industry + '.xlsx')
+    
+    total = pd.DataFrame(columns = ['date'])
+    
+    for i in list(產業['證期會代碼']):
+        print(i)
+        
+        sql = "select * from data.%(stock)s where date > %(pid)s" # 使用 params 進行參數傳遞
+        temp = pd.read_sql(sql, con = database_connection, params = {'stock': i ,'pid': '2018-01-04'})
+        
+        if len(temp) == 0:
+            continue
+        
+        temp['5ma'] = temp['close'].rolling(5).mean()
+        temp['10ma'] = temp['close'].rolling(10).mean()
+        temp['20ma'] = temp['close'].rolling(20).mean()
+        temp['60ma'] = temp['close'].rolling(60).mean()
+        
+        temp['volume_mean'] = temp['volume'].rolling(20).mean()
+        
+        temp['score'] = 0
+        
+        temp = temp.dropna()
+        
+        for t in range(0,len(temp)):
+            if temp['volume_mean'].iloc[t] < 1000:
+                continue
+            x = score(temp['close'].iloc[t], temp['5ma'].iloc[t], temp['10ma'].iloc[t], 
+                      temp['20ma'].iloc[t], temp['60ma'].iloc[t]) 
+            temp.iloc[t,12] = x
+            
+        data[i] = temp
+        
+        hot = temp[['date','score']]
+    
+        hot.columns = ['date', i]
+        total = pd.merge(total, hot,  on = 'date', how="outer")
+        
+    total = total.sort_values(by=['date'])    
+    total['total'] = total.iloc[:,1:].apply(lambda x:x.sum(),axis = 1)
+    total['number'] = total.iloc[:,1:-1].apply(lambda x:np.sum(x >= 0),axis = 1)
+    total['score'] = total['total'] / total['number']
+    
+    figure = total[['date', 'score']]
+    figure['exp10'] = figure['score'].ewm(span=10).mean()
+    figure['exp60'] = figure['score'].ewm(span=60).mean()
+    figure[industry] = figure['exp10'] - figure['exp60']
+    block = figure[['date', industry]]
+    sheet[industry] = total
+
+    final = pd.merge(final, block,  on = 'date', how="outer")
+
+connection.close()
