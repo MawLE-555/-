@@ -1,0 +1,365 @@
+import numpy as np
+import pandas as pd
+import math, talib, pymysql
+import statsmodels.api as sm
+from sqlalchemy import create_engine
+import math
+
+'==================================資料庫設定========================================'
+
+db = {"host": "localhost",
+    "user": "root",
+    "passwd": "strigo80010",
+    "database":"data"
+    }
+
+connection = pymysql.connect(**db)
+cursor = connection.cursor()
+database_connection = create_engine('mysql+mysqlconnector://{0}:{1}@{2}/{3}'.
+                                               format(db['user'], db['passwd'], 
+                                                      db['host'], db['database']))
+
+
+'==================================函數設定=========================================='
+
+def cal_volume(close, volume):
+    num = close - close.shift(1)
+    total = pd.DataFrame()
+    for t in range(0, len(close)):      
+        volumes = volume.iloc[t]
+        if num.iloc[t] >= 0:
+            total = total.append([volumes])
+        else:
+            total = total.append([-volumes])
+    total = total.reset_index(drop = True)
+    total = total.rolling(20).sum()
+    return total
+
+
+def limit(price):
+    if 10  > price:
+        if price % 0.01 != 0:
+            price = 0.01 * (price // 0.01)
+            price = (math.floor(price*100)/100)
+    if 50  > price >= 10:
+        if price % 0.05 != 0:
+            price = 0.05 * (price // 0.05)
+            price = (math.floor(price*100)/100)
+    if 100 > price >= 50:
+        if price % 0.1 != 0:
+            price = 0.1 * (price // 0.1)
+            price = (math.floor(price*10)/10)
+    if 500 > price >= 100:
+        if price % 0.5 != 0:
+            price = 0.5 * (price // 0.5)
+            price = (math.floor(price*10)/10)
+    if 1000 > price >= 500:
+        if price % 1 != 0:
+            price = 1 * (price // 1)
+            price = math.floor(price)
+    if price > 1000:
+        if price % 5 != 0:
+            price = 5 * (price // 5)
+            price = math.floor(price)
+    return price
+    
+
+'==================================資料整理===========================================' 
+
+data = {}
+stocks = pd.read_excel('C:/Users/User/Desktop/quantitative/data/全部.xlsx')
+tw = pd.read_excel('C:/Users/User/Desktop/quantitative/data/指數.xlsx')
+tw = tw[['date', 'exp']]
+
+for stock in list(stocks['證期會代碼']):
+    print(stock)
+    sql = "select * from data.%(stock)s where date > %(pid)s" # 使用 params 進行參數傳遞
+    temp = pd.read_sql(sql, con = database_connection, params = {'stock': stock ,'pid': '2000-01-01'})
+    if len(temp) == 0:
+        continue
+    
+    temp = temp.merge(tw ,on = 'date',how = 'inner')
+    startline = temp.date.iloc[0]
+    deadline = temp.date.iloc[-1]
+    
+    try:
+        dividends = pd.read_excel('C:/Users/User/Desktop/quantitative/dividends/'+ str(stock) +'.xlsx')
+        
+        cash_dividends = dividends.iloc[:,4:6].dropna()
+        cash_dividends.columns = ['date' ,'dividends']
+                
+        stock_dividends = dividends.iloc[:,6:8].dropna()            
+        stock_dividends.columns = ['date' ,'stockdividends']
+                
+        temp = pd.merge(temp, cash_dividends, how = 'outer')
+        temp = pd.merge(temp, stock_dividends, how = 'outer')
+    except:
+        temp['dividends'] = np.nan
+        temp['stockdividends'] = np.nan
+        
+    try:
+        reduction = pd.read_excel('C:/Users/User/Desktop/quantitative/reduction/'+ str(stock) +'.xlsx')
+      
+        reduction = reduction.iloc[:,1:]                     
+        reduction = reduction.rename(columns = {'除權日':'date'})
+            
+        temp = pd.merge(temp, reduction, how="outer")
+    except:
+        temp['減資每股退還現金'] = np.nan
+        temp['減資率 %'] = np.nan
+    
+    try:
+        segmentation = pd.read_excel('C:/Users/User/Desktop/quantitative/segmentation/'+ str(stock) +'.xlsx')
+                       
+        segmentation = segmentation.iloc[:,1:] 
+            
+        segmentation = segmentation.rename(columns={'除權日':'date'})                    
+            
+        temp = pd.merge(temp, segmentation, how="outer")
+    except:
+        temp['面額'] = np.nan
+
+    temp = temp.sort_values(by = ['date'], ignore_index = True)
+    
+    x = temp.date[temp.date == startline].index[0]
+    y = temp.date[temp.date == deadline].index[0]
+    
+    temp = temp.iloc[x : y+1]
+    temp = temp.reset_index(drop = True)
+    
+    temp['ma50'] = temp['close'].rolling(50).mean()
+    temp['ma200'] = temp['close'].rolling(200).mean()
+    temp['obv'] = cal_volume(temp.close, temp.volume)
+    temp['rsi'] = talib.RSI((temp['close']/temp['exp']), timeperiod = 10)
+    data[stock] = temp
+    
+
+'==================================主程式===========================================' 
+
+total = pd.DataFrame()
+
+for j in data.items():
+    print(j[0])
+    raw_data = j[1]
+    
+    buy_day = pd.DataFrame()
+    sell_day = pd.DataFrame()
+    type = pd.DataFrame()
+    
+    index = raw_data[(raw_data.ma200.shift(1) > raw_data.ma50.shift(1)) & 
+                     (raw_data.ma50 > raw_data.ma200) &
+                     (raw_data.ma200 > raw_data.ma200.shift(1)) &
+                     (raw_data.ma200 > raw_data.ma200.shift(2)) &
+                     (raw_data.ma200 > raw_data.ma200.shift(3)) &
+                     (raw_data.rsi > raw_data.rsi.shift(20)) &
+                     (raw_data.obv > 0)].index
+
+    for t in index:
+        signal_price = raw_data.ma200.loc[t]
+        
+        if t >= len(raw_data.close)-2:
+            continue
+        else:
+            if signal_price*1.2 > raw_data.close.loc[t] >= signal_price*1.1:
+                for i in range(t,t+20):
+                    if i >= len(raw_data.close)-1:
+                        break
+                    if raw_data.volume.loc[i+1] == 0:
+                            continue
+                    if raw_data.close.loc[i+1] == limit(raw_data.close.loc[i]*1.1):
+                            continue
+                    print(1)
+                    type = type.append([1], ignore_index = True)
+                    buy_price = raw_data.close.loc[i+1]
+                    buy_date = raw_data.date.loc[i+1]
+                    buy_day = buy_day.append([i+1], ignore_index = True)
+                    print('買入時間 : %s, 價格 : %s ' %(buy_date.strftime('%Y-%m-%d'), buy_price))
+                    for r in range(i+2, len(raw_data.close)):
+                        if ((raw_data.close.loc[r] > signal_price*1.2) or 
+                            (raw_data.close.loc[r] < raw_data.ma200.loc[r])
+                            ):
+                    
+                            if raw_data.volume.loc[r+1] == 0:
+                                continue
+                            if raw_data.close.loc[r+1] == limit(raw_data.close.loc[r]*0.9):
+                                continue
+                            if raw_data.close.loc[r+1] == limit(raw_data.close.loc[r]*1.1):
+                                continue
+                            
+                            sell_price = raw_data.close.loc[r+1]
+                            sell_date = raw_data.date.loc[r+1]
+                            sell_day = sell_day.append([r+1], ignore_index = True)
+                            print('賣出時間 : %s, 價格 : %s ' %(sell_date.strftime('%Y-%m-%d'), sell_price))
+                            break
+                        
+                        elif r == len(raw_data.close)-1:
+                            sell_price = raw_data.close.loc[r]
+                            sell_date = raw_data.date.loc[r]
+                            sell_day = sell_day.append([r], ignore_index = True)
+                            print('賣出時間 : %s, 價格 : %s ' %(sell_date.strftime('%Y-%m-%d'), sell_price))
+                            break
+                    break
+                    
+            elif signal_price*1.1 > raw_data.close.loc[t]:
+                for i in range(t,t+20):
+                    if i >= len(raw_data.close)-3:
+                        break
+                    if raw_data.close.loc[i+1] > signal_price*1.1:  
+                        if raw_data.volume.loc[i+2] == 0:
+                            continue
+                        if raw_data.close.loc[i+2] == limit(raw_data.close.loc[i+1]*1.1):
+                            continue
+                        print(2)
+                        type = type.append([2], ignore_index = True)
+                        buy_price = raw_data.iloc[i+2]['close']
+                        buy_date = raw_data.loc[i+2]['date']
+                        buy_day = buy_day.append([i+2], ignore_index = True)
+                        print('買入時間 : %s, 價格 : %s ' %(buy_date.strftime('%Y-%m-%d'), buy_price))
+                        for r in range(i+3, len(raw_data.close)):
+                            if ((raw_data.close.loc[r] > signal_price*1.2) or 
+                                (raw_data.close.loc[r] < raw_data.ma200.loc[r])
+                                ):
+                                
+                                if raw_data.volume.loc[r+1] == 0:
+                                    continue
+                                if raw_data.close.loc[r+1] == limit(raw_data.close.loc[r]*0.9):
+                                    continue
+                                if raw_data.close.loc[r+1] == limit(raw_data.close.loc[r]*1.1):
+                                    continue
+                                
+                                sell_price = raw_data.close.loc[r+1]
+                                sell_date = raw_data.date.loc[r+1]
+                                sell_day = sell_day.append([r+1], ignore_index = True)
+                                print('賣出時間 : %s, 價格 : %s ' %(sell_date.strftime('%Y-%m-%d'), sell_price))
+                                break
+                            elif r == len(raw_data.close)-1:
+                                sell_price = raw_data.close.loc[r]
+                                sell_date = raw_data.date.loc[r]
+                                sell_day = sell_day.append([r], ignore_index = True)
+                                print('賣出時間 : %s, 價格 : %s ' %(sell_date.strftime('%Y-%m-%d'), sell_price))
+                                break
+                        break
+                            
+            elif raw_data.close.loc[t] >= signal_price*1.2:    
+                for i in range(t,t+20):
+                    if i >= len(raw_data.close)-3:
+                        break
+                    if raw_data.close.loc[i+1] < signal_price*1.1: 
+                        if raw_data.volume.loc[i+2] == 0:
+                            continue
+                        if raw_data.close.loc[i+2] == limit(raw_data.close.loc[i+1]*1.1):
+                            continue
+                        print(3)
+                        type = type.append([3], ignore_index = True)
+                        buy_price = raw_data.iloc[i+2]['close']
+                        buy_date = raw_data.loc[i+2]['date']
+                        buy_day = buy_day.append([i+2], ignore_index = True)
+                        print('買入時間 : %s, 價格 : %s ' %(buy_date.strftime('%Y-%m-%d'), buy_price))
+                        for r in range(i+3, len(raw_data.close)):
+                            if ((raw_data.close.loc[r] > signal_price*1.2) or 
+                                (raw_data.close.loc[r] < raw_data.ma200.loc[r])
+                                ):
+                                
+                                if raw_data.volume.loc[r+1] == 0:
+                                    continue
+                                if raw_data.close.loc[r+1] == limit(raw_data.close.loc[r]*0.9):
+                                    continue
+                                if raw_data.close.loc[r+1] == limit(raw_data.close.loc[r]*1.1):
+                                    continue
+                                
+                                sell_price = raw_data.close.loc[r+1]
+                                sell_date = raw_data.date.loc[r+1]
+                                sell_day = sell_day.append([r+1], ignore_index = True)
+                                print('賣出時間 : %s, 價格 : %s ' %(sell_date.strftime('%Y-%m-%d'), sell_price))
+                                break
+                            elif r == len(raw_data.close)-1:
+                                sell_price = raw_data.close.loc[r]
+                                sell_date = raw_data.date.loc[r]
+                                sell_day = sell_day.append([r], ignore_index = True)
+                                print('賣出時間 : %s, 價格 : %s ' %(sell_date.strftime('%Y-%m-%d'), sell_price))
+                                break
+                        break
+        
+    if len(buy_day) == 0:
+        print('無交易產生')
+        continue
+    
+    if len(buy_day) != len(sell_day):
+        print('匹配不完全')
+        continue
+        
+    buy_date_total = pd.DataFrame()
+    sell_date_total = pd.DataFrame()
+    
+    type.columns = ['type']
+    
+    for buy in buy_day[0]:
+        x = raw_data.loc[[buy]][['date', 'close']]
+        buy_date_total = buy_date_total.append(x, ignore_index = True)
+    
+    buy_date_total.columns = ['buy_day', 'buy_price']
+        
+    for sell in sell_day[0]:
+        x = raw_data.loc[[sell]][['date', 'close']]
+        sell_date_total = sell_date_total.append(x, ignore_index = True)
+    
+    sell_date_total.columns = ['sell_day', 'sell_price']
+    
+    sheet = pd.concat([buy_date_total, sell_date_total, type], axis = 1) 
+    sheet['id'] = j[0]
+    sheet['dividends'] = 0
+    sheet['stockdividends'] = 0
+    sheet['減資每股退還現金'] = 0
+    sheet['減資率 %'] = 0
+    sheet['面額'] = 10
+    
+    for i in range(0, len(sheet)):
+        check = raw_data.iloc[buy_day[0].loc[i]+1 : sell_day[0].loc[i]]
+        check = check.dropna(subset=['dividends', 'stockdividends', '減資每股退還現金'
+                            , '減資率 %', '面額'],
+                             axis=0,
+                             how='all', # how='all'表示指定列的值都为空，就删掉该行
+                             ) 
+        if len(check) != 0:
+            try:
+                temp = check['dividends'].dropna()
+                sheet['dividends'].loc[i] = temp.iloc[-1].astype('float')
+            except:
+                pass
+            try:
+                temp = check['stockdividends'].dropna()
+                sheet['stockdividends'].loc[i] = temp.iloc[-1].astype('float')
+            except:
+                pass
+            try:
+                temp = check['減資每股退還現金'].dropna()
+                sheet['減資每股退還現金'].loc[i] = temp.iloc[-1].astype('float')  
+            except:
+                pass
+            try:
+                temp = check['減資率 %'].dropna()
+                sheet['減資率 %'].loc[i] = temp.iloc[-1].astype('float') 
+            except:
+                pass
+            try:
+                temp = check['面額'].dropna()
+                sheet['面額'].loc[i] = temp.iloc[-1].astype('float')   
+            except:
+                pass
+            
+    total = total.append(sheet, ignore_index = True)
+       
+total['restore'] = total['sell_price']*(1-total['減資率 %']*0.01)*(10/total['面額']) + total['減資每股退還現金']
+total['restore'] = total['restore']*(1+0.1*total['stockdividends']) + total['dividends']
+
+total['ret'] = 0
+
+for i in range(0,len(total)):
+    total['ret'].loc[i] = math.log(total.restore.loc[i]) - math.log(total.buy_price.loc[i])
+
+type = pd.DataFrame()
+
+for t in list(total.type[total.type == 3].index):
+    type = type.append(total.loc[[t]], ignore_index = True)
+
+print(type['ret'].mean())
